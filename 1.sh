@@ -5,7 +5,6 @@ set -e
 # AmneziaWG Automatic Installer – устойчивая версия
 # =============================================================================
 
-# Параметры (можно переопределить переменными окружения)
 PORT="${AWG_PORT:-51820}"
 SUBNET="${AWG_SUBNET:-10.0.0.0/24}"
 CLIENTS="${AWG_CLIENTS:-4}"
@@ -49,7 +48,7 @@ apt install -y amneziawg
 
 # --- Проверка наличия утилит wg и awg ---
 if ! command -v wg &> /dev/null; then
-    echo "❌ wg not found. Installation of wireguard-tools failed."
+    echo "❌ wg command not found. Installation of wireguard-tools might have failed."
     exit 1
 fi
 
@@ -68,8 +67,8 @@ chmod 600 server_private.key server_public.key
 SERVER_PRIV=$(cat server_private.key)
 SERVER_PUB=$(cat server_public.key)
 
-# --- Подготовка подсети ---
-SUBNET_BASE=$(echo $SUBNET | cut -d '/' -f1)
+# --- Подготовка подсети (только для /24) ---
+SUBNET_BASE=$(echo $SUBNET | cut -d '/' -f1 | cut -d '.' -f1-3)
 SUBNET_MASK=$(echo $SUBNET | cut -d '/' -f2)
 SERVER_ADDR="${SUBNET_BASE}.1/${SUBNET_MASK}"
 
@@ -111,8 +110,7 @@ fi
 mkdir -p /root/awg-clients
 cd /etc/wireguard/keys
 
-# Первый IP для клиента (сервер уже занимает .1)
-CLIENT_IP_START=$(( $(echo $SUBNET_BASE | cut -d '.' -f4) + 1 ))
+CLIENT_IP_START=2   # первый клиент получает .2
 for i in $(seq 1 $CLIENTS); do
     CLIENT_NAME="client${i}"
     CLIENT_IP="${SUBNET_BASE}.$((CLIENT_IP_START + i - 1))/32"
@@ -121,7 +119,6 @@ for i in $(seq 1 $CLIENTS); do
     CLIENT_PRIV=$(cat ${CLIENT_NAME}_private.key)
     CLIENT_PUB=$(cat ${CLIENT_NAME}_public.key)
 
-    # Добавляем пира в конфиг сервера
     cat >> /etc/wireguard/awg0.conf <<EOF
 
 [Peer]
@@ -129,7 +126,6 @@ PublicKey = ${CLIENT_PUB}
 AllowedIPs = ${CLIENT_IP}
 EOF
 
-    # Создаём клиентский конфиг
     cat > /root/awg-clients/${CLIENT_NAME}.conf <<EOF
 [Interface]
 PrivateKey = ${CLIENT_PRIV}
