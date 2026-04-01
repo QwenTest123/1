@@ -2,13 +2,13 @@
 set -e
 
 # =============================================================================
-# XRay + VLESS + XTLS-Reality Automatic Installer (исправленная версия)
+# XRay + VLESS + XTLS-Reality Automatic Installer (исправленный)
 # =============================================================================
 
 # Параметры (можно переопределить переменными окружения)
-XRAY_PORT="${XRAY_PORT:-443}"                     # Порт XRay (обычно 443)
+XRAY_PORT="${XRAY_PORT:-443}"                     # Порт XRay
 CLIENTS="${XRAY_CLIENTS:-4}"                      # Количество клиентов
-PUBLIC_DOMAIN="${XRAY_DOMAIN:-www.google.com}"    # Сайт для маскировки
+PUBLIC_DOMAIN="${XRAY_DOMAIN:-www.apple.com}"     # Сайт для маскировки (безопасный)
 INTERFACE="${XRAY_IF:-}"                          # Сетевой интерфейс (определится сам)
 
 if [ "$EUID" -ne 0 ]; then
@@ -36,7 +36,7 @@ echo "✅ Server IP: $EXTERNAL_IP, Interface: $INTERFACE"
 # --- Создание каталогов ---
 mkdir -p /usr/local/etc/xray /root/xray-clients
 
-# --- Генерация пары ключей Reality (x25519) ---
+# --- Генерация ключей Reality (x25519) ---
 /usr/local/bin/xray x25519 > /tmp/xray_keys.txt
 PRIVATE_KEY_REALITY=$(grep Private /tmp/xray_keys.txt | awk '{print $2}')
 PUBLIC_KEY_REALITY=$(grep Public /tmp/xray_keys.txt | awk '{print $2}')
@@ -45,7 +45,7 @@ rm /tmp/xray_keys.txt
 # --- Генерация shortId (8 hex-символов) ---
 SHORT_ID=$(openssl rand -hex 8)
 
-# --- Базовый конфиг сервера (пока без клиентов) ---
+# --- Базовый конфиг сервера (пустой список клиентов) ---
 cat > /usr/local/etc/xray/config.json <<EOF
 {
   "log": {
@@ -105,16 +105,16 @@ cat > /usr/local/etc/xray/config.json <<EOF
 }
 EOF
 
-# --- Добавление клиентов (генерируем UUID и вносим в конфиг) ---
+# --- Добавление клиентов ---
 for i in $(seq 1 $CLIENTS); do
     CLIENT_NAME="client${i}"
     # Генерация UUID через XRay
     UUID=$(/usr/local/bin/xray uuid)
-    # Добавляем клиента в JSON с помощью jq (прямое редактирование)
+    # Добавляем клиента в конфиг через jq
     jq --arg uuid "$UUID" '.inbounds[0].settings.clients += [{"id": $uuid, "flow": "xtls-rprx-vision"}]' \
         /usr/local/etc/xray/config.json > /tmp/config.json && \
         mv /tmp/config.json /usr/local/etc/xray/config.json
-    # Сохраняем UUID для создания ссылок
+    # Сохраняем UUID для ссылок
     echo "$UUID" > /root/xray-clients/${CLIENT_NAME}.uuid
 done
 
@@ -131,7 +131,7 @@ cd /root/xray-clients
 for i in $(seq 1 $CLIENTS); do
     CLIENT_NAME="client${i}"
     UUID=$(cat ${CLIENT_NAME}.uuid)
-    # Формируем ссылку vless
+    # Формируем ссылку с правильным pbk
     VLESS_LINK="vless://${UUID}@${EXTERNAL_IP}:${XRAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${PUBLIC_DOMAIN}&fp=chrome&pbk=${PUBLIC_KEY_REALITY}&sid=${SHORT_ID}&type=tcp&headerType=none#${CLIENT_NAME}"
     echo "$VLESS_LINK" > ${CLIENT_NAME}.link
     # QR-код в текстовом виде (опционально)
