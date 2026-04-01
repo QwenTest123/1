@@ -2,7 +2,7 @@
 set -e
 
 # =============================================================================
-# XRay + VLESS + XTLS-Reality Automatic Installer (исправленный финал)
+# XRay + VLESS + XTLS-Reality Automatic Installer (финальный)
 # =============================================================================
 
 XRAY_PORT="${XRAY_PORT:-443}"
@@ -38,18 +38,15 @@ echo "✅ Server IP: $EXTERNAL_IP, Interface: $INTERFACE"
 # --- Создание каталогов ---
 mkdir -p /usr/local/etc/xray /root/xray-clients
 
-# --- Генерация ключей Reality (x25519) с выводом на экран ---
+# --- Генерация ключей Reality (приватный + публичный) ---
 echo "🔑 Generating Reality keys..."
-KEY_OUTPUT=$(/usr/local/bin/xray x25519 2>/dev/null)
-if [ -z "$KEY_OUTPUT" ]; then
-    echo "❌ Failed to generate x25519 keys. Xray binary may be broken."
-    exit 1
-fi
-PRIVATE_KEY_REALITY=$(echo "$KEY_OUTPUT" | grep Private | awk '{print $2}')
-PUBLIC_KEY_REALITY=$(echo "$KEY_OUTPUT" | grep Public | awk '{print $2}')
+# Генерируем приватный ключ
+PRIVATE_KEY_REALITY=$(/usr/local/bin/xray x25519 | grep -oE '[A-Za-z0-9+/=]+$')
+# Вычисляем публичный ключ из приватного
+PUBLIC_KEY_REALITY=$(/usr/local/bin/xray x25519 -i "$PRIVATE_KEY_REALITY" | grep -oE '[A-Za-z0-9+/=]+$')
 
 if [ -z "$PRIVATE_KEY_REALITY" ] || [ -z "$PUBLIC_KEY_REALITY" ]; then
-    echo "❌ Could not extract keys from xray output: $KEY_OUTPUT"
+    echo "❌ Failed to generate x25519 keys."
     exit 1
 fi
 echo "✅ Keys generated successfully."
@@ -144,7 +141,6 @@ cd /root/xray-clients
 for i in $(seq 1 $CLIENTS); do
     CLIENT_NAME="client${i}"
     UUID=$(cat ${CLIENT_NAME}.uuid)
-    # Формируем ссылку с правильным pbk
     VLESS_LINK="vless://${UUID}@${EXTERNAL_IP}:${XRAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${PUBLIC_DOMAIN}&fp=chrome&pbk=${PUBLIC_KEY_REALITY}&sid=${SHORT_ID}&type=tcp&headerType=none#${CLIENT_NAME}"
     echo "$VLESS_LINK" > ${CLIENT_NAME}.link
     qrencode -t utf8 -o ${CLIENT_NAME}.txt "$VLESS_LINK"
