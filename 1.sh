@@ -29,18 +29,27 @@ echo "✅ Server IP: $EXTERNAL_IP, Interface: $INTERFACE"
 mkdir -p /usr/local/etc/xray /root/xray-clients
 
 echo "🔑 Generating Reality keys..."
-# Генерируем приватный ключ и извлекаем только ключ (без слова PrivateKey)
-PRIVATE_KEY_REALITY=$(/usr/local/bin/xray x25519 | awk '/PrivateKey:/ {print $2}')
+
+# Генерируем приватный ключ и извлекаем base64 строку
+/usr/local/bin/xray x25519 > /tmp/xray_priv.tmp
+PRIVATE_KEY_REALITY=$(grep -oE '[A-Za-z0-9+/=]+' /tmp/xray_priv.tmp | head -n1)
+rm -f /tmp/xray_priv.tmp
+
 if [ -z "$PRIVATE_KEY_REALITY" ]; then
     echo "❌ Failed to generate private key."
     exit 1
 fi
+
 # Вычисляем публичный ключ из приватного
-PUBLIC_KEY_REALITY=$(/usr/local/bin/xray x25519 -i "$PRIVATE_KEY_REALITY" | awk '/PublicKey:/ {print $2}')
+/usr/local/bin/xray x25519 -i "$PRIVATE_KEY_REALITY" > /tmp/xray_pub.tmp
+PUBLIC_KEY_REALITY=$(grep -oE '[A-Za-z0-9+/=]+' /tmp/xray_pub.tmp | head -n1)
+rm -f /tmp/xray_pub.tmp
+
 if [ -z "$PUBLIC_KEY_REALITY" ]; then
     echo "❌ Failed to generate public key."
     exit 1
 fi
+
 echo "✅ Keys generated successfully."
 echo "   PrivateKey: $PRIVATE_KEY_REALITY"
 echo "   PublicKey:  $PUBLIC_KEY_REALITY"
@@ -94,6 +103,7 @@ systemctl restart xray
 sleep 2
 if ! systemctl is-active --quiet xray; then
     echo "❌ XRay failed to start. Check logs: journalctl -u xray"
+    journalctl -u xray --no-pager -n 20
     exit 1
 fi
 
