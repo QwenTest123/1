@@ -2,14 +2,13 @@
 set -e
 
 # =============================================================================
-# XRay + VLESS + XTLS-Reality Automatic Installer (исправленный)
+# XRay + VLESS + XTLS-Reality Automatic Installer (с проверками)
 # =============================================================================
 
-# Параметры (можно переопределить переменными окружения)
-XRAY_PORT="${XRAY_PORT:-443}"                     # Порт XRay
-CLIENTS="${XRAY_CLIENTS:-4}"                      # Количество клиентов
-PUBLIC_DOMAIN="${XRAY_DOMAIN:-www.apple.com}"     # Сайт для маскировки (безопасный)
-INTERFACE="${XRAY_IF:-}"                          # Сетевой интерфейс (определится сам)
+XRAY_PORT="${XRAY_PORT:-443}"
+CLIENTS="${XRAY_CLIENTS:-4}"
+PUBLIC_DOMAIN="${XRAY_DOMAIN:-www.apple.com}"
+INTERFACE="${XRAY_IF:-}"
 
 if [ "$EUID" -ne 0 ]; then
     echo "❌ Please run as root."
@@ -26,6 +25,9 @@ apt install -y curl wget unzip qrencode ufw python3 zip jq
 # --- Установка XRay (официальный скрипт) ---
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
+# --- Небольшая задержка, чтобы бинарник XRay стал доступен ---
+sleep 2
+
 # --- Определение внешнего IP и интерфейса ---
 EXTERNAL_IP=$(curl -s ifconfig.me)
 if [ -z "$INTERFACE" ]; then
@@ -36,11 +38,21 @@ echo "✅ Server IP: $EXTERNAL_IP, Interface: $INTERFACE"
 # --- Создание каталогов ---
 mkdir -p /usr/local/etc/xray /root/xray-clients
 
-# --- Генерация ключей Reality (x25519) ---
-/usr/local/bin/xray x25519 > /tmp/xray_keys.txt
+# --- Генерация ключей Reality (x25519) с проверкой ---
+echo "🔑 Generating Reality keys..."
+if ! /usr/local/bin/xray x25519 > /tmp/xray_keys.txt 2>/dev/null; then
+    echo "❌ Failed to generate x25519 keys. Xray binary may be broken."
+    exit 1
+fi
 PRIVATE_KEY_REALITY=$(grep Private /tmp/xray_keys.txt | awk '{print $2}')
 PUBLIC_KEY_REALITY=$(grep Public /tmp/xray_keys.txt | awk '{print $2}')
 rm /tmp/xray_keys.txt
+
+if [ -z "$PRIVATE_KEY_REALITY" ] || [ -z "$PUBLIC_KEY_REALITY" ]; then
+    echo "❌ Could not extract keys from xray output."
+    exit 1
+fi
+echo "✅ Keys generated successfully."
 
 # --- Генерация shortId (8 hex-символов) ---
 SHORT_ID=$(openssl rand -hex 8)
@@ -108,13 +120,10 @@ EOF
 # --- Добавление клиентов ---
 for i in $(seq 1 $CLIENTS); do
     CLIENT_NAME="client${i}"
-    # Генерация UUID через XRay
     UUID=$(/usr/local/bin/xray uuid)
-    # Добавляем клиента в конфиг через jq
     jq --arg uuid "$UUID" '.inbounds[0].settings.clients += [{"id": $uuid, "flow": "xtls-rprx-vision"}]' \
         /usr/local/etc/xray/config.json > /tmp/config.json && \
         mv /tmp/config.json /usr/local/etc/xray/config.json
-    # Сохраняем UUID для ссылок
     echo "$UUID" > /root/xray-clients/${CLIENT_NAME}.uuid
 done
 
@@ -134,7 +143,6 @@ for i in $(seq 1 $CLIENTS); do
     # Формируем ссылку с правильным pbk
     VLESS_LINK="vless://${UUID}@${EXTERNAL_IP}:${XRAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${PUBLIC_DOMAIN}&fp=chrome&pbk=${PUBLIC_KEY_REALITY}&sid=${SHORT_ID}&type=tcp&headerType=none#${CLIENT_NAME}"
     echo "$VLESS_LINK" > ${CLIENT_NAME}.link
-    # QR-код в текстовом виде (опционально)
     qrencode -t utf8 -o ${CLIENT_NAME}.txt "$VLESS_LINK"
 done
 
