@@ -29,18 +29,18 @@ echo "✅ Server IP: $EXTERNAL_IP, Interface: $INTERFACE"
 mkdir -p /usr/local/etc/xray /root/xray-clients
 
 echo "🔑 Generating Reality keys..."
-PRIVATE_KEY_REALITY=$(/usr/local/bin/xray x25519)
+# Генерируем приватный ключ и извлекаем только ключ (без слова PrivateKey)
+PRIVATE_KEY_REALITY=$(/usr/local/bin/xray x25519 | awk '/PrivateKey:/ {print $2}')
 if [ -z "$PRIVATE_KEY_REALITY" ]; then
     echo "❌ Failed to generate private key."
     exit 1
 fi
-PUBLIC_KEY_REALITY=$(/usr/local/bin/xray x25519 -i "$PRIVATE_KEY_REALITY")
+# Вычисляем публичный ключ из приватного
+PUBLIC_KEY_REALITY=$(/usr/local/bin/xray x25519 -i "$PRIVATE_KEY_REALITY" | awk '/PublicKey:/ {print $2}')
 if [ -z "$PUBLIC_KEY_REALITY" ]; then
     echo "❌ Failed to generate public key."
     exit 1
 fi
-PRIVATE_KEY_REALITY=$(echo "$PRIVATE_KEY_REALITY" | tr -d '\n\r')
-PUBLIC_KEY_REALITY=$(echo "$PUBLIC_KEY_REALITY" | tr -d '\n\r')
 echo "✅ Keys generated successfully."
 echo "   PrivateKey: $PRIVATE_KEY_REALITY"
 echo "   PublicKey:  $PUBLIC_KEY_REALITY"
