@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-
-# XRay + VLESS + XTLS-Reality Automatic Installer (с проверками)
+# =============================================================================
+# XRay + VLESS + XTLS-Reality Automatic Installer (исправленный финал)
 # =============================================================================
 
 XRAY_PORT="${XRAY_PORT:-443}"
@@ -38,24 +38,27 @@ echo "✅ Server IP: $EXTERNAL_IP, Interface: $INTERFACE"
 # --- Создание каталогов ---
 mkdir -p /usr/local/etc/xray /root/xray-clients
 
-# --- Генерация ключей Reality (x25519) с проверкой ---
+# --- Генерация ключей Reality (x25519) с выводом на экран ---
 echo "🔑 Generating Reality keys..."
-if ! /usr/local/bin/xray x25519 > /tmp/xray_keys.txt 2>/dev/null; then
+KEY_OUTPUT=$(/usr/local/bin/xray x25519 2>/dev/null)
+if [ -z "$KEY_OUTPUT" ]; then
     echo "❌ Failed to generate x25519 keys. Xray binary may be broken."
     exit 1
 fi
-PRIVATE_KEY_REALITY=$(grep Private /tmp/xray_keys.txt | awk '{print $2}')
-PUBLIC_KEY_REALITY=$(grep Public /tmp/xray_keys.txt | awk '{print $2}')
-rm /tmp/xray_keys.txt
+PRIVATE_KEY_REALITY=$(echo "$KEY_OUTPUT" | grep Private | awk '{print $2}')
+PUBLIC_KEY_REALITY=$(echo "$KEY_OUTPUT" | grep Public | awk '{print $2}')
 
 if [ -z "$PRIVATE_KEY_REALITY" ] || [ -z "$PUBLIC_KEY_REALITY" ]; then
-    echo "❌ Could not extract keys from xray output."
+    echo "❌ Could not extract keys from xray output: $KEY_OUTPUT"
     exit 1
 fi
 echo "✅ Keys generated successfully."
+echo "   PrivateKey: $PRIVATE_KEY_REALITY"
+echo "   PublicKey:  $PUBLIC_KEY_REALITY"
 
 # --- Генерация shortId (8 hex-символов) ---
 SHORT_ID=$(openssl rand -hex 8)
+echo "✅ shortId: $SHORT_ID"
 
 # --- Базовый конфиг сервера (пустой список клиентов) ---
 cat > /usr/local/etc/xray/config.json <<EOF
@@ -125,6 +128,7 @@ for i in $(seq 1 $CLIENTS); do
         /usr/local/etc/xray/config.json > /tmp/config.json && \
         mv /tmp/config.json /usr/local/etc/xray/config.json
     echo "$UUID" > /root/xray-clients/${CLIENT_NAME}.uuid
+    echo "   Client $i UUID: $UUID"
 done
 
 # --- Перезапуск XRay ---
@@ -144,6 +148,7 @@ for i in $(seq 1 $CLIENTS); do
     VLESS_LINK="vless://${UUID}@${EXTERNAL_IP}:${XRAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${PUBLIC_DOMAIN}&fp=chrome&pbk=${PUBLIC_KEY_REALITY}&sid=${SHORT_ID}&type=tcp&headerType=none#${CLIENT_NAME}"
     echo "$VLESS_LINK" > ${CLIENT_NAME}.link
     qrencode -t utf8 -o ${CLIENT_NAME}.txt "$VLESS_LINK"
+    echo "   ${CLIENT_NAME}.link created"
 done
 
 # --- Создание ZIP-архива со всеми конфигами ---
