@@ -30,23 +30,19 @@ mkdir -p /usr/local/etc/xray /root/xray-clients
 
 echo "🔑 Generating Reality keys..."
 
-# Генерируем приватный ключ и извлекаем base64 строку
-/usr/local/bin/xray x25519 > /tmp/xray_priv.tmp
-PRIVATE_KEY_REALITY=$(grep -oE '[A-Za-z0-9+/=]+' /tmp/xray_priv.tmp | head -n1)
-rm -f /tmp/xray_priv.tmp
-
-if [ -z "$PRIVATE_KEY_REALITY" ]; then
-    echo "❌ Failed to generate private key."
+# Генерируем приватный ключ
+PRIV_OUT=$(/usr/local/bin/xray x25519)
+PRIVATE_KEY_REALITY=$(echo "$PRIV_OUT" | awk '{if(NF==2) print $2; else print $1}')
+if [[ ! "$PRIVATE_KEY_REALITY" =~ ^[A-Za-z0-9+/=]+$ ]] || [ ${#PRIVATE_KEY_REALITY} -lt 40 ]; then
+    echo "❌ Invalid private key: '$PRIVATE_KEY_REALITY'"
     exit 1
 fi
 
-# Вычисляем публичный ключ из приватного
-/usr/local/bin/xray x25519 -i "$PRIVATE_KEY_REALITY" > /tmp/xray_pub.tmp
-PUBLIC_KEY_REALITY=$(grep -oE '[A-Za-z0-9+/=]+' /tmp/xray_pub.tmp | head -n1)
-rm -f /tmp/xray_pub.tmp
-
-if [ -z "$PUBLIC_KEY_REALITY" ]; then
-    echo "❌ Failed to generate public key."
+# Вычисляем публичный ключ
+PUB_OUT=$(/usr/local/bin/xray x25519 -i "$PRIVATE_KEY_REALITY")
+PUBLIC_KEY_REALITY=$(echo "$PUB_OUT" | awk '{if(NF==2) print $2; else print $1}')
+if [[ ! "$PUBLIC_KEY_REALITY" =~ ^[A-Za-z0-9+/=]+$ ]] || [ ${#PUBLIC_KEY_REALITY} -lt 40 ]; then
+    echo "❌ Invalid public key: '$PUBLIC_KEY_REALITY'"
     exit 1
 fi
 
