@@ -2,7 +2,7 @@
 set -e
 
 # =============================================================================
-# XRay + VLESS + XTLS-Reality Automatic Installer (с проверками)
+# XRay + VLESS + XTLS-Reality Automatic Installer (только IPv4)
 # =============================================================================
 
 XRAY_PORT="${XRAY_PORT:-443}"
@@ -28,12 +28,17 @@ bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release
 # --- Небольшая задержка, чтобы бинарник XRay стал доступен ---
 sleep 2
 
-# --- Определение внешнего IP и интерфейса ---
-EXTERNAL_IP=$(curl -s ifconfig.me)
-if [ -z "$INTERFACE" ]; then
-    INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+# --- Определение внешнего IPv4 адреса (игнорируем IPv6) ---
+EXTERNAL_IP=$(curl -4 -s ifconfig.me 2>/dev/null || curl -4 -s icanhazip.com 2>/dev/null)
+if [ -z "$EXTERNAL_IP" ]; then
+    echo "❌ Failed to determine external IPv4 address."
+    exit 1
 fi
-echo "✅ Server IP: $EXTERNAL_IP, Interface: $INTERFACE"
+# --- Определение интерфейса по умолчанию (IPv4) ---
+if [ -z "$INTERFACE" ]; then
+    INTERFACE=$(ip -4 route | grep default | awk '{print $5}' | head -n1)
+fi
+echo "✅ Server IPv4: $EXTERNAL_IP, Interface: $INTERFACE"
 
 # --- Создание каталогов ---
 mkdir -p /usr/local/etc/xray /root/xray-clients
