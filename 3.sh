@@ -1,38 +1,26 @@
 #!/bin/bash
 set -e
 
-echo "🤖 Начинаем установку Telegram-бота для мониторинга XRay..."
-
-# --- 1. Запрашиваем токен и chat_id ---
-read -p "Введите TELEGRAM_TOKEN (получите у @BotFather): " TELEGRAM_TOKEN
-if [ -z "$TELEGRAM_TOKEN" ]; then
-    echo "❌ Токен не может быть пустым."
+if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+    echo "❌ Ошибка: не заданы TELEGRAM_TOKEN и CHAT_ID"
+    echo "📌 Использование: TELEGRAM_TOKEN=... CHAT_ID=... bash <(curl -s URL)"
     exit 1
 fi
 
-read -p "Введите ваш CHAT_ID (узнайте у @userinfobot): " CHAT_ID
-if [ -z "$CHAT_ID" ]; then
-    echo "❌ Chat ID не может быть пустым."
-    exit 1
-fi
+echo "🤖 Установка Telegram-бота для мониторинга XRay..."
 
-# --- 2. Обновляем систему и устанавливаем зависимости ---
 export DEBIAN_FRONTEND=noninteractive
 apt update
 apt install -y python3 python3-venv python3-pip git curl
 
-# --- 3. Создаём папку для бота и переходим в неё ---
 mkdir -p /opt/xray-bot && cd /opt/xray-bot
-
-# --- 4. Создаём виртуальное окружение и устанавливаем библиотеку ---
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
 pip install python-telegram-bot==20.7
 deactivate
 
-# --- 5. Создаём основной скрипт бота с полным функционалом ---
-cat > /opt/xray-bot/bot.py <<'EOF'
+cat > /opt/xray-bot/bot.py <<EOF
 import asyncio
 import subprocess
 import re
@@ -43,22 +31,17 @@ from collections import defaultdict
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ========== НАСТРОЙКИ ==========
-TOKEN = "TELEGRAM_TOKEN_PLACEHOLDER"
-CHAT_ID = "CHAT_ID_PLACEHOLDER"
+TOKEN = "$TELEGRAM_TOKEN"
+CHAT_ID = "$CHAT_ID"
 ACCESS_LOG = "/var/log/xray/access.log"
-# ===============================
 
-# Словарь для хранения статистики
 traffic_stats = defaultdict(lambda: {'upload': 0, 'download': 0})
 
 def parse_traffic_from_log():
-    """Парсит лог и возвращает статистику по клиентам."""
     stats = defaultdict(lambda: {'upload': 0, 'download': 0})
     try:
         with open(ACCESS_LOG, 'r') as f:
             for line in f:
-                # Формат: 2026/04/04 16:45:01 [Info] [client1] accepted tcp:www.google.com:443 [1000 2000]
                 match = re.search(r'\[Info\] \[([^\]]+)\].*?\[(\d+) (\d+)\]', line)
                 if match:
                     email, up, down = match.groups()
@@ -92,27 +75,22 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     stats = parse_traffic_from_log()
     if not stats:
-        await update.message.reply_text("📭 За сегодня нет данных. Убедитесь, что XRay логирует трафик.")
+        await update.message.reply_text("📭 За сегодня нет данных.")
         return
     msg = f"📊 *Статистика за {datetime.now().strftime('%Y-%m-%d')}*\n\n"
     for email, data in stats.items():
         total = data['upload'] + data['download']
-        msg += f"👤 {email}\n"
-        msg += f"   ↑ Отправлено: {format_bytes(data['upload'])}\n"
-        msg += f"   ↓ Получено:  {format_bytes(data['download'])}\n"
-        msg += f"   💰 Всего:     {format_bytes(total)}\n\n"
+        msg += f"👤 {email}\n   ↑ {format_bytes(data['upload'])} ↓ {format_bytes(data['download'])} (всего {format_bytes(total)})\n"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) != CHAT_ID:
         return
-    chat_id = update.effective_chat.id
-    # Запускаем фоновую задачу мониторинга, если ещё не запущена
     if 'monitor_task' not in context.bot_data:
-        context.bot_data['monitor_task'] = asyncio.create_task(monitor_logs(context.bot, chat_id))
-        await update.message.reply_text("✅ Отслеживание подключений запущено. Используйте /stop для остановки.")
+        context.bot_data['monitor_task'] = asyncio.create_task(monitor_logs(context.bot, update.effective_chat.id))
+        await update.message.reply_text("✅ Отслеживание подключений запущено. /stop для остановки.")
     else:
-        await update.message.reply_text("⚠️ Отслеживание уже запущено.")
+        await update.message.reply_text("⚠️ Уже запущено.")
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) != CHAT_ID:
@@ -120,39 +98,27 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'monitor_task' in context.bot_data:
         context.bot_data['monitor_task'].cancel()
         del context.bot_data['monitor_task']
-        await update.message.reply_text("⏹ Отслеживание подключений остановлено.")
+        await update.message.reply_text("⏹ Отслеживание остановлено.")
     else:
-        await update.message.reply_text("ℹ️ Отслеживание не было запущено.")
+        await update.message.reply_text("ℹ️ Не было запущено.")
 
 async def monitor_logs(bot, chat_id):
-    """Фоновая задача: читает лог и отправляет уведомления о новых подключениях."""
     try:
-        proc = await asyncio.create_subprocess_exec(
-            'tail', '-F', ACCESS_LOG,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+        proc = await asyncio.create_subprocess_exec('tail', '-F', ACCESS_LOG, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         while True:
             line = await proc.stdout.readline()
             if not line:
                 break
             line = line.decode('utf-8').strip()
-            # Ищем строки с подключениями
             match = re.search(r'\[Info\] \[([^\]]+)\] accepted tcp:', line)
             if match:
                 email = match.group(1)
                 timestamp = datetime.now().strftime("%H:%M:%S")
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🔔 *Новое подключение*\n"
-                         f"👤 Клиент: `{email}`\n"
-                         f"🕒 Время: {timestamp}",
-                    parse_mode="Markdown"
-                )
+                await bot.send_message(chat_id=chat_id, text=f"🔔 *Новое подключение*\n👤 Клиент: `{email}`\n🕒 {timestamp}", parse_mode="Markdown")
     except asyncio.CancelledError:
         pass
     except Exception as e:
-        await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка мониторинга: {e}")
+        await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка: {e}")
 
 def main():
     app = Application.builder().token(TOKEN).build()
@@ -166,11 +132,6 @@ if __name__ == "__main__":
     main()
 EOF
 
-# Подставляем реальные значения
-sed -i "s/TELEGRAM_TOKEN_PLACEHOLDER/$TELEGRAM_TOKEN/g" /opt/xray-bot/bot.py
-sed -i "s/CHAT_ID_PLACEHOLDER/$CHAT_ID/g" /opt/xray-bot/bot.py
-
-# --- 6. Создаём systemd сервис для автозапуска ---
 cat > /etc/systemd/system/xray-bot.service <<EOF
 [Unit]
 Description=XRay Telegram Bot
@@ -188,18 +149,10 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-# --- 7. Запускаем бота ---
 systemctl daemon-reload
 systemctl enable xray-bot.service
 systemctl start xray-bot.service
 
-# --- 8. Финальные сообщения ---
 echo ""
-echo "✅ Установка Telegram-бота завершена!"
-echo "📋 Команды бота:"
-echo "   /stats  - Статистика трафика за сегодня"
-echo "   /live   - Включить уведомления о новых подключениях"
-echo "   /stop   - Выключить уведомления"
-echo ""
-echo "🔄 Бот автоматически запущен и добавлен в автозагрузку."
-echo "📱 Откройте Telegram и отправьте боту команду /start"
+echo "✅ Установка завершена! Бот запущен."
+echo "📱 Отправьте боту /start в Telegram."
