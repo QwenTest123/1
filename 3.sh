@@ -1,204 +1,186 @@
 #!/bin/bash
-# Финальная установка бота XRay с управлением клиентами
-
 set -e
 
-if [ "$EUID" -ne 0 ]; then
-    echo "❌ Запустите от root"
+echo "🤖 Начинаем установку Telegram-бота для мониторинга XRay..."
+
+# --- 1. Запрашиваем токен и chat_id ---
+read -p "Введите TELEGRAM_TOKEN (получите у @BotFather): " TELEGRAM_TOKEN
+if [ -z "$TELEGRAM_TOKEN" ]; then
+    echo "❌ Токен не может быть пустым."
     exit 1
 fi
 
-if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$CHAT_ID" ]; then
-    echo "❌ Использование: TELEGRAM_TOKEN=... CHAT_ID=... bash $0"
+read -p "Введите ваш CHAT_ID (узнайте у @userinfobot): " CHAT_ID
+if [ -z "$CHAT_ID" ]; then
+    echo "❌ Chat ID не может быть пустым."
     exit 1
 fi
 
-echo "🤖 Установка бота для управления XRay..."
-echo "   Токен: ${TELEGRAM_TOKEN:0:10}..."
-echo "   Chat ID: $CHAT_ID"
+# --- 2. Обновляем систему и устанавливаем зависимости ---
+export DEBIAN_FRONTEND=noninteractive
+apt update
+apt install -y python3 python3-venv python3-pip git curl
 
-# Установка пакетов
-apt update && apt upgrade -y
-apt install -y curl wget unzip ufw python3 python3-venv python3-pip git jq
+# --- 3. Создаём папку для бота и переходим в неё ---
+mkdir -p /opt/xray-bot && cd /opt/xray-bot
 
-# Установка xray-auc
-echo "📥 Установка xray-auc..."
-wget -q --show-progress -O /usr/local/bin/xray-auc https://github.com/archer-v/xray-auc/releases/download/v0.6.5/xray-auc-linux-amd64
-chmod +x /usr/local/bin/xray-auc
-
-# Определение inbound tag
-INBOUND_TAG=$(jq -r '.inbounds[0].tag' /usr/local/etc/xray/config.json 2>/dev/null || echo "vless-inbound")
-[ "$INBOUND_TAG" = "null" ] && INBOUND_TAG="vless-inbound"
-echo "   Inbound tag: $INBOUND_TAG"
-
-# Клонирование бота
-rm -rf /opt/xray-traffic-bot
-git clone https://github.com/maxgalzer/xray-traffic-bot.git /opt/xray-traffic-bot
-cd /opt/xray-traffic-bot
-
-# Виртуальное окружение
+# --- 4. Создаём виртуальное окружение и устанавливаем библиотеку ---
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install python-telegram-bot==20.7
 deactivate
 
-# Конфиг бота
-cat > /opt/xray-traffic-bot/config.py <<EOF
-TOKEN = "$TELEGRAM_TOKEN"
-CHAT_ID = "$CHAT_ID"
+# --- 5. Создаём основной скрипт бота с полным функционалом ---
+cat > /opt/xray-bot/bot.py <<'EOF'
+import asyncio
+import subprocess
+import re
+import os
+from datetime import datetime
+from collections import defaultdict
+
+from telegram import Update, BotCommand
+from telegram.ext import Application, CommandHandler, ContextTypes
+
+# ========== НАСТРОЙКИ ==========
+TOKEN = "TELEGRAM_TOKEN_PLACEHOLDER"
+CHAT_ID = "CHAT_ID_PLACEHOLDER"
 ACCESS_LOG = "/var/log/xray/access.log"
-SUMMARY_INTERVAL = 6
+# ===============================
+
+# Словарь для хранения статистики
+traffic_stats = defaultdict(lambda: {'upload': 0, 'download': 0})
+
+def parse_traffic_from_log():
+    """Парсит лог и возвращает статистику по клиентам."""
+    stats = defaultdict(lambda: {'upload': 0, 'download': 0})
+    try:
+        with open(ACCESS_LOG, 'r') as f:
+            for line in f:
+                # Формат: 2026/04/04 16:45:01 [Info] [client1] accepted tcp:www.google.com:443 [1000 2000]
+                match = re.search(r'\[Info\] \[([^\]]+)\].*?\[(\d+) (\d+)\]', line)
+                if match:
+                    email, up, down = match.groups()
+                    stats[email]['upload'] += int(up)
+                    stats[email]['download'] += int(down)
+    except FileNotFoundError:
+        pass
+    return stats
+
+def format_bytes(bytes):
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if bytes < 1024:
+            return f"{bytes:.1f} {unit}"
+        bytes /= 1024
+    return f"{bytes:.1f} TB"
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_chat.id) != CHAT_ID:
+        return
+    await update.message.reply_text(
+        "🤖 *Бот для мониторинга XRay*\n\n"
+        "📊 Команды:\n"
+        "/stats - Статистика трафика за сегодня\n"
+        "/live - Подключения в реальном времени (присылает уведомления)\n"
+        "/stop - Остановить уведомления",
+        parse_mode="Markdown"
+    )
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_chat.id) != CHAT_ID:
+        return
+    stats = parse_traffic_from_log()
+    if not stats:
+        await update.message.reply_text("📭 За сегодня нет данных. Убедитесь, что XRay логирует трафик.")
+        return
+    msg = f"📊 *Статистика за {datetime.now().strftime('%Y-%m-%d')}*\n\n"
+    for email, data in stats.items():
+        total = data['upload'] + data['download']
+        msg += f"👤 {email}\n"
+        msg += f"   ↑ Отправлено: {format_bytes(data['upload'])}\n"
+        msg += f"   ↓ Получено:  {format_bytes(data['download'])}\n"
+        msg += f"   💰 Всего:     {format_bytes(total)}\n\n"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def live(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_chat.id) != CHAT_ID:
+        return
+    chat_id = update.effective_chat.id
+    # Запускаем фоновую задачу мониторинга, если ещё не запущена
+    if 'monitor_task' not in context.bot_data:
+        context.bot_data['monitor_task'] = asyncio.create_task(monitor_logs(context.bot, chat_id))
+        await update.message.reply_text("✅ Отслеживание подключений запущено. Используйте /stop для остановки.")
+    else:
+        await update.message.reply_text("⚠️ Отслеживание уже запущено.")
+
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_chat.id) != CHAT_ID:
+        return
+    if 'monitor_task' in context.bot_data:
+        context.bot_data['monitor_task'].cancel()
+        del context.bot_data['monitor_task']
+        await update.message.reply_text("⏹ Отслеживание подключений остановлено.")
+    else:
+        await update.message.reply_text("ℹ️ Отслеживание не было запущено.")
+
+async def monitor_logs(bot, chat_id):
+    """Фоновая задача: читает лог и отправляет уведомления о новых подключениях."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'tail', '-F', ACCESS_LOG,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            line = line.decode('utf-8').strip()
+            # Ищем строки с подключениями
+            match = re.search(r'\[Info\] \[([^\]]+)\] accepted tcp:', line)
+            if match:
+                email = match.group(1)
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🔔 *Новое подключение*\n"
+                         f"👤 Клиент: `{email}`\n"
+                         f"🕒 Время: {timestamp}",
+                    parse_mode="Markdown"
+                )
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка мониторинга: {e}")
+
+def main():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("live", live))
+    app.add_handler(CommandHandler("stop", stop))
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
 EOF
 
-# Создаём модуль admin_commands.py
-cat > /opt/xray-traffic-bot/admin_commands.py <<ADMINEOF
-import subprocess
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
+# Подставляем реальные значения
+sed -i "s/TELEGRAM_TOKEN_PLACEHOLDER/$TELEGRAM_TOKEN/g" /opt/xray-bot/bot.py
+sed -i "s/CHAT_ID_PLACEHOLDER/$CHAT_ID/g" /opt/xray-bot/bot.py
 
-INBOUND_TAG = "$INBOUND_TAG"
-CHAT_ID = "$CHAT_ID"
-
-def get_users():
-    try:
-        r = subprocess.run(['/usr/local/bin/xray-auc', 'listUsers', '-t', INBOUND_TAG],
-                           capture_output=True, text=True, timeout=10)
-        if r.returncode == 0:
-            return [l.strip() for l in r.stdout.split('\n') if l.strip()]
-        return []
-    except:
-        return []
-
-def add_user(email, uuid=None):
-    cmd = ['/usr/local/bin/xray-auc', 'addUser', '-p', 'vless', '-e', email, '--flow', 'xtls-rprx-vision', '-t', INBOUND_TAG]
-    if uuid:
-        cmd.extend(['-s', uuid])
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        return r.returncode == 0, r.stderr
-    except Exception as e:
-        return False, str(e)
-
-def remove_user(email):
-    try:
-        r = subprocess.run(['/usr/local/bin/xray-auc', 'rmUser', '-e', email, '-t', INBOUND_TAG],
-                           capture_output=True, text=True, timeout=10)
-        return r.returncode == 0, r.stderr
-    except Exception as e:
-        return False, str(e)
-
-def show_user(email):
-    try:
-        r = subprocess.run(['/usr/local/bin/xray-auc', 'showUser', '-e', email, '-t', INBOUND_TAG],
-                           capture_output=True, text=True, timeout=10)
-        if r.returncode == 0:
-            return r.stdout
-        return None
-    except:
-        return None
-
-async def list_users(update, context):
-    if str(update.effective_chat.id) != CHAT_ID: return
-    users = get_users()
-    if not users:
-        await update.message.reply_text("📭 Нет активных клиентов.")
-    else:
-        msg = "📋 *Список клиентов:*\n" + "\n".join(f"• `{u}`" for u in users)
-        await update.message.reply_text(msg, parse_mode="Markdown")
-
-async def add_client(update, context):
-    if str(update.effective_chat.id) != CHAT_ID: return
-    args = context.args
-    if len(args) < 1:
-        await update.message.reply_text("❌ Использование: /add_client <email> [uuid]")
-        return
-    email = args[0]
-    uuid = args[1] if len(args) > 1 else None
-    ok, err = add_user(email, uuid)
-    if ok:
-        await update.message.reply_text(f"✅ Клиент `{email}` добавлен.", parse_mode="Markdown")
-    else:
-        await update.message.reply_text(f"❌ Ошибка: {err}")
-
-async def del_client(update, context):
-    if str(update.effective_chat.id) != CHAT_ID: return
-    args = context.args
-    if len(args) < 1:
-        await update.message.reply_text("❌ Использование: /del_client <email>")
-        return
-    email = args[0]
-    ok, err = remove_user(email)
-    if ok:
-        await update.message.reply_text(f"✅ Клиент `{email}` удалён.", parse_mode="Markdown")
-    else:
-        await update.message.reply_text(f"❌ Ошибка: {err}")
-
-async def show_user_cmd(update, context):
-    if str(update.effective_chat.id) != CHAT_ID: return
-    args = context.args
-    if len(args) < 1:
-        await update.message.reply_text("❌ Использование: /show_user <email>")
-        return
-    email = args[0]
-    cfg = show_user(email)
-    if cfg:
-        await update.message.reply_text(f"🔧 Конфигурация для `{email}`:\n```\n{cfg}\n```", parse_mode="Markdown")
-    else:
-        await update.message.reply_text(f"❌ Клиент `{email}` не найден.", parse_mode="Markdown")
-
-async def menu(update, context):
-    if str(update.effective_chat.id) != CHAT_ID: return
-    keyboard = [
-        [InlineKeyboardButton("📊 Статус", callback_data="status")],
-        [InlineKeyboardButton("📋 Список клиентов", callback_data="list")],
-        [InlineKeyboardButton("➕ Добавить клиента", callback_data="add_prompt")],
-        [InlineKeyboardButton("❌ Удалить клиента", callback_data="del_prompt")],
-        [InlineKeyboardButton("🔍 Показать конфиг", callback_data="show_prompt")],
-    ]
-    await update.message.reply_text("🤖 *Панель управления XRay*", parse_mode="Markdown",
-                                    reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def button_handler(update, context):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data == "status":
-        await query.message.reply_text("Статус сервера: работает (заглушка)")
-    elif data == "list":
-        await list_users(update, context)
-    elif data == "add_prompt":
-        await query.edit_message_text("Введите команду: `/add_client <email> [uuid]`", parse_mode="Markdown")
-    elif data == "del_prompt":
-        await query.edit_message_text("Введите команду: `/del_client <email>`", parse_mode="Markdown")
-    elif data == "show_prompt":
-        await query.edit_message_text("Введите команду: `/show_user <email>`", parse_mode="Markdown")
-
-def register_handlers(app):
-    app.add_handler(CommandHandler("start", menu))
-    app.add_handler(CommandHandler("list", list_users))
-    app.add_handler(CommandHandler("add_client", add_client))
-    app.add_handler(CommandHandler("del_client", del_client))
-    app.add_handler(CommandHandler("show_user", show_user_cmd))
-    app.add_handler(CallbackQueryHandler(button_handler))
-ADMINEOF
-
-# Интеграция в bot.py
-if ! grep -q "from admin_commands import register_handlers" /opt/xray-traffic-bot/bot.py; then
-    echo -e "\n# Добавлено для управления клиентами\nfrom admin_commands import register_handlers\nregister_handlers(app)" >> /opt/xray-traffic-bot/bot.py
-fi
-
-# Сервис systemd
-cat > /etc/systemd/system/xray-traffic-bot.service <<EOF
+# --- 6. Создаём systemd сервис для автозапуска ---
+cat > /etc/systemd/system/xray-bot.service <<EOF
 [Unit]
-Description=XRay Bot
+Description=XRay Telegram Bot
 After=network.target xray.service
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/xray-traffic-bot
-ExecStart=/opt/xray-traffic-bot/venv/bin/python /opt/xray-traffic-bot/bot.py
+WorkingDirectory=/opt/xray-bot
+ExecStart=/opt/xray-bot/venv/bin/python /opt/xray-bot/bot.py
 Restart=always
 RestartSec=10
 
@@ -206,9 +188,18 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+# --- 7. Запускаем бота ---
 systemctl daemon-reload
-systemctl enable xray-traffic-bot.service
-systemctl restart xray-traffic-bot.service
+systemctl enable xray-bot.service
+systemctl start xray-bot.service
 
-echo "✅ Установка завершена!"
-echo "📱 Отправьте боту /start в Telegram"
+# --- 8. Финальные сообщения ---
+echo ""
+echo "✅ Установка Telegram-бота завершена!"
+echo "📋 Команды бота:"
+echo "   /stats  - Статистика трафика за сегодня"
+echo "   /live   - Включить уведомления о новых подключениях"
+echo "   /stop   - Выключить уведомления"
+echo ""
+echo "🔄 Бот автоматически запущен и добавлен в автозагрузку."
+echo "📱 Откройте Telegram и отправьте боту команду /start"
