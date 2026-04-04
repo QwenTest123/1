@@ -3,6 +3,8 @@ set -e
 
 # =============================================================================
 # Установка Telegram-бота для мониторинга и управления XRay
+# Использование:
+#   TELEGRAM_TOKEN=токен CHAT_ID=id bash <(curl -s URL)
 # =============================================================================
 
 if [ "$EUID" -ne 0 ]; then
@@ -10,118 +12,105 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+    echo "❌ Ошибка: не заданы TELEGRAM_TOKEN и CHAT_ID"
+    echo "📌 Использование: TELEGRAM_TOKEN=... CHAT_ID=... bash <(curl -s URL)"
+    exit 1
+fi
+
 echo "🤖 Установка бота для управления XRay..."
+echo "   Токен: ${TELEGRAM_TOKEN:0:10}..."
+echo "   Chat ID: $CHAT_ID"
 
-# --- Запрос токена и Chat ID ---
-read -p "Введите TELEGRAM_TOKEN (получите у @BotFather): " TELEGRAM_TOKEN
-if [ -z "$TELEGRAM_TOKEN" ]; then
-    echo "❌ Токен не может быть пустым."
-    exit 1
-fi
-
-read -p "Введите ваш CHAT_ID (узнайте у @userinfobot): " CHAT_ID
-if [ -z "$CHAT_ID" ]; then
-    echo "❌ Chat ID не может быть пустым."
-    exit 1
-fi
-
-# --- Обновление и установка зависимостей ---
 export DEBIAN_FRONTEND=noninteractive
 apt update && apt upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
 apt install -y curl wget unzip ufw python3 python3-venv python3-pip git jq
 
-# --- Установка xray-auc (утилита управления клиентами) ---
+# --- Установка xray-auc (с запасным вариантом) ---
 echo "📥 Установка xray-auc..."
-LATEST_URL=$(curl -s https://api.github.com/repos/archer-v/xray-auc/releases/latest | grep -oP '"browser_download_url": "\K[^"]+linux-amd64[^"]*')
+LATEST_URL=$(curl -s https://api.github.com/repos/archer-v/xray-auc/releases/latest | grep -oP '"browser_download_url": "\K[^"]+linux-amd64[^"]*' | head -1)
 if [ -z "$LATEST_URL" ]; then
-    echo "⚠️ Не удалось определить последнюю версию, скачиваю стабильную..."
+    echo "⚠️ Не удалось определить последнюю версию, использую v0.6.5"
     LATEST_URL="https://github.com/archer-v/xray-auc/releases/download/v0.6.5/xray-auc-linux-amd64"
 fi
-wget -q -O /usr/local/bin/xray-auc "$LATEST_URL"
+wget -q --show-progress -O /usr/local/bin/xray-auc "$LATEST_URL"
 chmod +x /usr/local/bin/xray-auc
 echo "✅ xray-auc установлен."
 
-# --- Определение inbound tag из конфига XRay ---
+# Определяем inbound tag
 INBOUND_TAG=$(jq -r '.inbounds[0].tag' /usr/local/etc/xray/config.json 2>/dev/null)
-if [ -z "$INBOUND_TAG" ] || [ "$INBOUND_TAG" = "null" ]; then
-    INBOUND_TAG="vless-inbound"
-    echo "⚠️ Не удалось определить tag входящего подключения, использую 'vless-inbound'."
-fi
+[ -z "$INBOUND_TAG" ] || [ "$INBOUND_TAG" = "null" ] && INBOUND_TAG="vless-inbound"
+echo "   Используется inbound tag: $INBOUND_TAG"
 
-# --- Установка xray-traffic-bot в виртуальное окружение ---
-echo "📥 Клонирование репозитория xray-traffic-bot..."
+# --- Установка бота ---
+rm -rf /opt/xray-traffic-bot
 git clone https://github.com/maxgalzer/xray-traffic-bot.git /opt/xray-traffic-bot
 cd /opt/xray-traffic-bot
 
-echo "🐍 Создание виртуального окружения..."
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 deactivate
 
-# --- Создание файла конфигурации бота (config.py) ---
+# Конфиг бота
 cat > /opt/xray-traffic-bot/config.py <<EOF
 TOKEN = "$TELEGRAM_TOKEN"
 CHAT_ID = "$CHAT_ID"
 ACCESS_LOG = "/var/log/xray/access.log"
-SUMMARY_INTERVAL = 6  # часов
+SUMMARY_INTERVAL = 6
 EOF
 
-# --- Модификация бота: добавление команд управления клиентами ---
-# Создаём скрипт-обработчик для команд
-cat > /opt/xray-traffic-bot/admin_commands.py <<'EOF'
+# --- Добавляем команды управления ---
+cat > /opt/xray-traffic-bot/admin_commands.py <<ADMINEOF
 import subprocess
-import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
 
-INBOUND_TAG = "$INBOUND_TAG"  # будет заменено при установке
+INBOUND_TAG = "$INBOUND_TAG"
+CHAT_ID = "$CHAT_ID"
 
 def get_users():
-    """Возвращает список email клиентов."""
     try:
-        result = subprocess.run(['/usr/local/bin/xray-auc', 'listUsers', '-t', INBOUND_TAG],
-                                capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            return [line.strip() for line in result.stdout.split('\n') if line.strip()]
+        r = subprocess.run(['/usr/local/bin/xray-auc', 'listUsers', '-t', INBOUND_TAG],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            return [l.strip() for l in r.stdout.split('\n') if l.strip()]
         return []
     except:
         return []
 
 def add_user(email, uuid=None):
-    """Добавляет клиента. Если uuid не указан, генерируется автоматически."""
-    cmd = ['/usr/local/bin/xray-auc', 'addUser', '-p', 'vless', '-e', email, '--flow', 'xtls-rprx-vision', '-t', INBOUND_TAG]
+    cmd = ['/usr/local/bin/xray-auc', 'addUser', '-p', 'vless', '-e', email,
+           '--flow', 'xtls-rprx-vision', '-t', INBOUND_TAG]
     if uuid:
         cmd.extend(['-s', uuid])
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        return result.returncode == 0, result.stderr
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return r.returncode == 0, r.stderr
     except Exception as e:
         return False, str(e)
 
 def remove_user(email):
     try:
-        result = subprocess.run(['/usr/local/bin/xray-auc', 'rmUser', '-e', email, '-t', INBOUND_TAG],
-                                capture_output=True, text=True, timeout=10)
-        return result.returncode == 0, result.stderr
+        r = subprocess.run(['/usr/local/bin/xray-auc', 'rmUser', '-e', email, '-t', INBOUND_TAG],
+                           capture_output=True, text=True, timeout=10)
+        return r.returncode == 0, r.stderr
     except Exception as e:
         return False, str(e)
 
 def show_user(email):
-    """Получает конфигурацию клиента (vless-ссылку)."""
     try:
-        result = subprocess.run(['/usr/local/bin/xray-auc', 'showUser', '-e', email, '-t', INBOUND_TAG],
-                                capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            return result.stdout
+        r = subprocess.run(['/usr/local/bin/xray-auc', 'showUser', '-e', email, '-t', INBOUND_TAG],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            return r.stdout
         return None
     except:
         return None
 
-async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_chat.id) != "$CHAT_ID":
-        return
+async def list_users(update, context):
+    if str(update.effective_chat.id) != CHAT_ID: return
     users = get_users()
     if not users:
         await update.message.reply_text("📭 Нет активных клиентов.")
@@ -129,71 +118,64 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = "📋 *Список клиентов:*\n" + "\n".join(f"• `{u}`" for u in users)
         await update.message.reply_text(msg, parse_mode="Markdown")
 
-async def add_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_chat.id) != "$CHAT_ID":
-        return
+async def add_client(update, context):
+    if str(update.effective_chat.id) != CHAT_ID: return
     args = context.args
     if len(args) < 1:
         await update.message.reply_text("❌ Использование: /add_client <email> [uuid]")
         return
     email = args[0]
     uuid = args[1] if len(args) > 1 else None
-    success, err = add_user(email, uuid)
-    if success:
+    ok, err = add_user(email, uuid)
+    if ok:
         await update.message.reply_text(f"✅ Клиент `{email}` добавлен.", parse_mode="Markdown")
     else:
         await update.message.reply_text(f"❌ Ошибка: {err}")
 
-async def del_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_chat.id) != "$CHAT_ID":
-        return
+async def del_client(update, context):
+    if str(update.effective_chat.id) != CHAT_ID: return
     args = context.args
     if len(args) < 1:
         await update.message.reply_text("❌ Использование: /del_client <email>")
         return
     email = args[0]
-    success, err = remove_user(email)
-    if success:
+    ok, err = remove_user(email)
+    if ok:
         await update.message.reply_text(f"✅ Клиент `{email}` удалён.", parse_mode="Markdown")
     else:
         await update.message.reply_text(f"❌ Ошибка: {err}")
 
-async def show_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_chat.id) != "$CHAT_ID":
-        return
+async def show_user_cmd(update, context):
+    if str(update.effective_chat.id) != CHAT_ID: return
     args = context.args
     if len(args) < 1:
         await update.message.reply_text("❌ Использование: /show_user <email>")
         return
     email = args[0]
-    config = show_user(email)
-    if config:
-        await update.message.reply_text(f"🔧 Конфигурация для `{email}`:\n```\n{config}\n```", parse_mode="Markdown")
+    cfg = show_user(email)
+    if cfg:
+        await update.message.reply_text(f"🔧 Конфигурация для `{email}`:\n```\n{cfg}\n```", parse_mode="Markdown")
     else:
         await update.message.reply_text(f"❌ Клиент `{email}` не найден.", parse_mode="Markdown")
 
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_chat.id) != "$CHAT_ID":
-        return
+async def menu(update, context):
+    if str(update.effective_chat.id) != CHAT_ID: return
     keyboard = [
         [InlineKeyboardButton("📊 Статус", callback_data="status")],
         [InlineKeyboardButton("📋 Список клиентов", callback_data="list")],
         [InlineKeyboardButton("➕ Добавить клиента", callback_data="add_prompt")],
         [InlineKeyboardButton("❌ Удалить клиента", callback_data="del_prompt")],
         [InlineKeyboardButton("🔍 Показать конфиг", callback_data="show_prompt")],
-        [InlineKeyboardButton("📈 Сводка за сегодня", callback_data="summary_today")],
-        [InlineKeyboardButton("🌐 Отслеживаемые домены", callback_data="domains")],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("🤖 *Панель управления XRay*", parse_mode="Markdown", reply_markup=reply_markup)
+    await update.message.reply_text("🤖 *Панель управления XRay*", parse_mode="Markdown",
+                                    reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update, context):
     query = update.callback_query
     await query.answer()
     data = query.data
     if data == "status":
-        # Вызов стандартной команды /status
-        await status(update, context)
+        await query.message.reply_text("Статус сервера: работает (заглушка)")
     elif data == "list":
         await list_users(update, context)
     elif data == "add_prompt":
@@ -202,44 +184,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Введите команду: `/del_client <email>`", parse_mode="Markdown")
     elif data == "show_prompt":
         await query.edit_message_text("Введите команду: `/show_user <email>`", parse_mode="Markdown")
-    elif data == "summary_today":
-        # Запрос сводки за сегодня (используем встроенную функцию бота)
-        await summary(update, context, period="today")
-    elif data == "domains":
-        await domains(update, context)
-
-# Функции-заглушки для совместимости (они уже есть в основном боте)
-async def status(update, context):
-    # Здесь должен быть код из основного бота
-    await update.message.reply_text("Статус сервера: работает")
-
-async def summary(update, context, period="today"):
-    await update.message.reply_text("Сводка за период: ...")
-
-async def domains(update, context):
-    await update.message.reply_text("Список отслеживаемых доменов: ...")
 
 def register_handlers(app):
     app.add_handler(CommandHandler("start", menu))
-    app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("list", list_users))
     app.add_handler(CommandHandler("add_client", add_client))
     app.add_handler(CommandHandler("del_client", del_client))
     app.add_handler(CommandHandler("show_user", show_user_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
-EOF
+ADMINEOF
 
-# Подставляем реальные значения в admin_commands.py
-sed -i "s/\$INBOUND_TAG/$INBOUND_TAG/g" /opt/xray-traffic-bot/admin_commands.py
-sed -i "s/\$CHAT_ID/$CHAT_ID/g" /opt/xray-traffic-bot/admin_commands.py
-
-# Модифицируем основной файл бота (bot.py), чтобы импортировать наши обработчики
-# Находим строку, где создаётся app, и добавляем регистрацию
+# Интеграция в bot.py
 if ! grep -q "from admin_commands import register_handlers" /opt/xray-traffic-bot/bot.py; then
     echo -e "\n# Добавлено для управления клиентами\nfrom admin_commands import register_handlers\nregister_handlers(app)" >> /opt/xray-traffic-bot/bot.py
 fi
 
-# --- Создание systemd сервиса ---
+# --- systemd сервис ---
 cat > /etc/systemd/system/xray-traffic-bot.service <<EOF
 [Unit]
 Description=XRay Traffic Bot with Admin Commands
@@ -261,21 +221,7 @@ systemctl daemon-reload
 systemctl enable xray-traffic-bot.service
 systemctl restart xray-traffic-bot.service
 
-# --- Создание файла с отслеживаемыми доменами (пример) ---
-cat > /opt/xray-traffic-bot/tracked_domains.txt <<EOF
-www.youtube.com
-www.facebook.com
-www.twitter.com
-www.instagram.com
-EOF
-
 echo ""
 echo "✅ Установка завершена!"
 echo "🤖 Бот запущен и добавлен в автозагрузку."
 echo "📱 Откройте Telegram и отправьте боту команду /start"
-echo "📋 Управление клиентами: /add_client, /del_client, /list, /show_user"
-echo "🔍 Отслеживание доменов: /adddomain, /removedomain, /domains"
-echo ""
-echo "⚠️ Убедитесь, что в конфиге XRay (/usr/local/etc/xray/config.json) установлен уровень логов 'info':"
-echo '   "log": { "loglevel": "info" }'
-echo "   И путь к логу: /var/log/xray/access.log"
