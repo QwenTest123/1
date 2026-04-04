@@ -1,20 +1,15 @@
 #!/bin/bash
+# Финальная установка бота XRay с управлением клиентами
+
 set -e
 
-# =============================================================================
-# Установка Telegram-бота для мониторинга и управления XRay
-# Использование:
-#   TELEGRAM_TOKEN=токен CHAT_ID=id bash <(curl -s URL)
-# =============================================================================
-
 if [ "$EUID" -ne 0 ]; then
-    echo "❌ Пожалуйста, запустите скрипт от root."
+    echo "❌ Запустите от root"
     exit 1
 fi
 
 if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$CHAT_ID" ]; then
-    echo "❌ Ошибка: не заданы TELEGRAM_TOKEN и CHAT_ID"
-    echo "📌 Использование: TELEGRAM_TOKEN=... CHAT_ID=... bash <(curl -s URL)"
+    echo "❌ Использование: TELEGRAM_TOKEN=... CHAT_ID=... bash $0"
     exit 1
 fi
 
@@ -22,31 +17,26 @@ echo "🤖 Установка бота для управления XRay..."
 echo "   Токен: ${TELEGRAM_TOKEN:0:10}..."
 echo "   Chat ID: $CHAT_ID"
 
-export DEBIAN_FRONTEND=noninteractive
-apt update && apt upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+# Установка пакетов
+apt update && apt upgrade -y
 apt install -y curl wget unzip ufw python3 python3-venv python3-pip git jq
 
-# --- Установка xray-auc (с запасным вариантом) ---
+# Установка xray-auc
 echo "📥 Установка xray-auc..."
-LATEST_URL=$(curl -s https://api.github.com/repos/archer-v/xray-auc/releases/latest | grep -oP '"browser_download_url": "\K[^"]+linux-amd64[^"]*' | head -1)
-if [ -z "$LATEST_URL" ]; then
-    echo "⚠️ Не удалось определить последнюю версию, использую v0.6.5"
-    LATEST_URL="https://github.com/archer-v/xray-auc/releases/download/v0.6.5/xray-auc-linux-amd64"
-fi
-wget -q --show-progress -O /usr/local/bin/xray-auc "$LATEST_URL"
+wget -q --show-progress -O /usr/local/bin/xray-auc https://github.com/archer-v/xray-auc/releases/download/v0.6.5/xray-auc-linux-amd64
 chmod +x /usr/local/bin/xray-auc
-echo "✅ xray-auc установлен."
 
-# Определяем inbound tag
-INBOUND_TAG=$(jq -r '.inbounds[0].tag' /usr/local/etc/xray/config.json 2>/dev/null)
-[ -z "$INBOUND_TAG" ] || [ "$INBOUND_TAG" = "null" ] && INBOUND_TAG="vless-inbound"
-echo "   Используется inbound tag: $INBOUND_TAG"
+# Определение inbound tag
+INBOUND_TAG=$(jq -r '.inbounds[0].tag' /usr/local/etc/xray/config.json 2>/dev/null || echo "vless-inbound")
+[ "$INBOUND_TAG" = "null" ] && INBOUND_TAG="vless-inbound"
+echo "   Inbound tag: $INBOUND_TAG"
 
-# --- Установка бота ---
+# Клонирование бота
 rm -rf /opt/xray-traffic-bot
 git clone https://github.com/maxgalzer/xray-traffic-bot.git /opt/xray-traffic-bot
 cd /opt/xray-traffic-bot
 
+# Виртуальное окружение
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
@@ -61,7 +51,7 @@ ACCESS_LOG = "/var/log/xray/access.log"
 SUMMARY_INTERVAL = 6
 EOF
 
-# --- Добавляем команды управления ---
+# Создаём модуль admin_commands.py
 cat > /opt/xray-traffic-bot/admin_commands.py <<ADMINEOF
 import subprocess
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -81,8 +71,7 @@ def get_users():
         return []
 
 def add_user(email, uuid=None):
-    cmd = ['/usr/local/bin/xray-auc', 'addUser', '-p', 'vless', '-e', email,
-           '--flow', 'xtls-rprx-vision', '-t', INBOUND_TAG]
+    cmd = ['/usr/local/bin/xray-auc', 'addUser', '-p', 'vless', '-e', email, '--flow', 'xtls-rprx-vision', '-t', INBOUND_TAG]
     if uuid:
         cmd.extend(['-s', uuid])
     try:
@@ -199,10 +188,10 @@ if ! grep -q "from admin_commands import register_handlers" /opt/xray-traffic-bo
     echo -e "\n# Добавлено для управления клиентами\nfrom admin_commands import register_handlers\nregister_handlers(app)" >> /opt/xray-traffic-bot/bot.py
 fi
 
-# --- systemd сервис ---
+# Сервис systemd
 cat > /etc/systemd/system/xray-traffic-bot.service <<EOF
 [Unit]
-Description=XRay Traffic Bot with Admin Commands
+Description=XRay Bot
 After=network.target xray.service
 
 [Service]
@@ -221,7 +210,5 @@ systemctl daemon-reload
 systemctl enable xray-traffic-bot.service
 systemctl restart xray-traffic-bot.service
 
-echo ""
 echo "✅ Установка завершена!"
-echo "🤖 Бот запущен и добавлен в автозагрузку."
-echo "📱 Откройте Telegram и отправьте боту команду /start"
+echo "📱 Отправьте боту /start в Telegram"
